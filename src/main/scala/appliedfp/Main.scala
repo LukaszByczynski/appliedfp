@@ -373,7 +373,7 @@ object types {
     object Applicative {
       type Parser[E, A] = String => Either[E, (String, A)]
 
-      implicit def ParserApply[E]: Applicative[Parser[E, ?]] = new Applicative[Parser[E, ?]] {
+      implicit def ParserApplicative[E]: Applicative[Parser[E, ?]] = new Applicative[Parser[E, ?]] {
         override def point[A](a: A): Parser[E, A] = {
           s => Right(s, a)
         }
@@ -394,7 +394,115 @@ object types {
     }
 
     object Monad {
+      def apply[F[_]](implicit m: Monad[F]): Monad[F] = m
 
+      implicit val MonadOption: Monad[Option] = new Monad[Option] {
+        override def bind[A, B](fa: Option[A], afb: A => Option[B]): Option[B] = {
+          // fa flatMap afb
+          fa match {
+            case Some(a) => afb(a)
+            case None => None
+          }
+        }
+
+        override def point[A](a: A): Option[A] = None
+
+        override def ap[A, B](ff: Option[A => B], fa: Option[A]): Option[B] = Apply.OptionApply.ap(ff, fa)
+
+        override def fmap[A, B](fa: Option[A], f: A => B): Option[B] = Apply.OptionApply.fmap(fa, f)
+      }
+
+      type Parser[E, A] = String => Either[E, (String, A)]
+
+      implicit def MonadParser[E]: Monad[Parser[E, ?]] = new Monad[Parser[E, ?]] {
+        override def bind[A, B](fa: Parser[E, A], afb: A => Parser[E, B]): Parser[E, B] = {
+          s => fa(s) match {
+            case Left(e) => Left(e)
+            case Right((str, a)) => afb(a)(s)
+          }
+        }
+
+        override def point[A](a: A): Parser[E, A] = Applicative.ParserApplicative.point(a)
+
+        override def ap[A, B](ff: Parser[E, A => B], fa: Parser[E, A]): Parser[E, B] =
+          Applicative.ParserApplicative.ap(ff, fa)
+
+        override def fmap[A, B](fa: Parser[E, A], f: A => B): Parser[E, B] =
+          Applicative.ParserApplicative.fmap(fa, f)
+      }
+
+      implicit class MonadSyntax[F[_], A](fa: F[A]) extends FunctorSyntax(fa) {
+        def map[B](f: A => B)(implicit m: Monad[F]): F[B] = m.fmap(fa, f)
+        def flatMap[B](f: A => F[B])(implicit m: Monad[F]): F[B] = m.bind(fa, f)
+        def zip[B](fb: F[B])(implicit m: Monad[F]): F[(A, B)] = m.zip(fa, fb)
+      }
+    }
+  }
+
+  object effects {
+    import appliedfp.types.zero.Zero
+    import ct.Monad
+
+    final case class IO[E, A](unsafePerformIO: () => Either[E, A]) { self =>
+      def map[B](f: A => B): IO[E, B] =
+        IO[E, B](() => self.unsafePerformIO().map(f))
+
+      def flatMap[B](f: A => IO[E, B]): IO[E, B] =
+        IO[E, B] { () =>
+          self.unsafePerformIO() match {
+            case Left(e) => Left(e)
+            case Right(a) => f(a).unsafePerformIO()
+          }
+        }
+
+      // Note: Attempt is not executing the code, only exposing the error to be flatMapped over
+      def attempt: IO[Zero, Either[E, A]] = {
+        IO(() => Right(self.unsafePerformIO()))
+      }
+    }
+
+    object IO {
+      def point[E, A](a: A): IO[E, A] = IO(() => Right(a))
+      def fail[E, A](e: E): IO[E, A] = IO(() => Left(e))
+
+      implicit def MonadIO[E]: Monad[IO[E, ?]] = new Monad[IO[E, ?]] {
+        override def point[A](a: A): IO[E, A] =
+          IO.point(a)
+
+        override def bind[A, B](fa: IO[E, A], f: A => IO[E, B]): IO[E, B] =
+          fa.flatMap(f)
+
+        override def ap[A, B](ff: IO[E, A => B], fa: IO[E, A]): IO[E, B] =
+          for {
+            f <- ff
+            a <- fa
+          } yield f(a)
+
+        override def fmap[A, B](fa: IO[E, A], f: A => B): IO[E, B] =
+          fa.map(f)
+      }
+    }
+  }
+
+  object console {
+    import effects._
+
+    def println(line: String): IO[Void, Unit] = IO(() => Right(println(line)))
+    val readLine: IO[Void, String] = IO(() => Right(scala.io.StdIn.readLine())) // Note that this can be val
+  }
+
+  object app {
+    import effects._
+    import ct.Monad._
+
+    def run(): Unit = {
+      val program: IO[Void, Unit] = for {
+        _ <- console.println("Hello! What is your name?")
+        name <- console.readLine
+        _ <- console.println("Hello, " + name + ", welcome to the game!")
+      } yield ()
+
+      program.unsafePerformIO()
     }
   }
 }
