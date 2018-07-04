@@ -495,11 +495,110 @@ object types {
     import effects._
     import ct.Monad._
 
-    def run(): Unit = {
+    sealed trait Selection
+    case object PlayGame extends Selection
+    case object Exit extends Selection
+
+    def printMenu: IO[Void, Unit] = {
+      console.println("Press 1 to start the game, press 2 to exit")
+    }
+
+    def parseInput(input: String): Option[Selection] = {
+      input.trim.toLowerCase match {
+        case "1" => Some(PlayGame)
+        case "2" => Some(Exit)
+        case _ => None
+      }
+    }
+
+    def invalidChoice: IO[Void, Unit] = {
+      console.println("Your choice was invalid")
+    }
+
+    final case class GameState(guessed: Set[Char], word: String)
+
+    def chooseWord: IO[Void, String] =
+      IO { () =>
+        val list = "monad" :: "functor" :: "israel" :: Nil
+
+        Right(list(scala.util.Random.nextInt(list.length)))
+      }
+
+    def printGame(state: GameState): IO[Void, Unit] = {
+      val word = state.word.toList
+        .map {
+          case c if state.guessed.contains(c) => c
+          case _ => "_"
+        }
+        .mkString
+
+      for {
+        _ <- console.println("Word: " + word)
+        _ <- console.println("Already guessed: " + state.guessed.mkString(", "))
+      } yield ()
+    }
+
+    def parseLetter(input: String): Option[Char] = {
+      input.trim.toLowerCase.toList match {
+        case c :: Nil if c.isLetter => Some(c)
+        case _ => None
+      }
+    }
+
+    def updateState(state: GameState, c: Char, guessesAllowed: Int): IO[Void, Option[GameState]] = {
+      val newState = state.copy(guessed = state.guessed + c)
+
+      if ((newState.word.toSet -- newState.guessed).isEmpty) {
+        for {
+          _ <- printGame(newState)
+          _ <- console.println((guessesAllowed - newState.guessed.size) + " guesses left")
+          _ <- console.println("Way to go! You guessed right!")
+        } yield None
+      } else if (newState.guessed.size > guessesAllowed) {
+        for {
+          _ <- printGame(newState)
+          _ <- console.println("Sorry, you lost.")
+        } yield None
+      } else {
+        for {
+          _ <- printGame(newState)
+          _ <- console.println((guessesAllowed - newState.guessed.size) + " guesses left")
+        } yield Option(newState)
+      }
+    }
+
+    def playGameLoop(state: GameState, guessesAllowed: Int): IO[Void, Unit] = {
+      for {
+        _ <- printGame(state)
+        input <- console.readLine
+        o <- parseLetter(input) match {
+          case None => console.println("Please enter just one letter").map(_ => Option(state))
+          case Some(c) => updateState(state, c, guessesAllowed)
+        }
+        _ <- o.fold(console.println("Good game!"))((state: GameState) => playGameLoop(state, guessesAllowed))
+      } yield ()
+    }
+
+    def playGame(guessesAllowed: Int): IO[Void, Unit] =
+      chooseWord.flatMap(word => playGameLoop(GameState(Set.empty, word), guessesAllowed))
+
+    def mainLoop: IO[Void, Unit] = {
+      val executeOnSelection: Selection => IO[Void, Unit] = {
+        case Exit => console.println("Goodbye!")
+        case PlayGame => playGame(6).flatMap(_ => mainLoop)
+      }
+
+      for {
+        _      <- printMenu
+        choice <- console.readLine
+        _      <- parseInput(choice).fold(invalidChoice)(executeOnSelection)
+      } yield ()
+    }
+
+    def main(args: Array[String]) {
       val program: IO[Void, Unit] = for {
-        _ <- console.println("Hello! What is your name?")
-        name <- console.readLine
-        _ <- console.println("Hello, " + name + ", welcome to the game!")
+        _ <- console.println("Hello! Welcome to the game!")
+        _ <- mainLoop
       } yield ()
 
       program.unsafePerformIO()
